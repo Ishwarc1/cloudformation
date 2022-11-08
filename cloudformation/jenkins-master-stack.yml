@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Infrastructure Deployment (Master Script)
+
+Parameters:
+  CostTagParameter:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - qa
+      - prd
+    Description: Enter one of the following dev, qa, prd
+
+  EnvironmentParameter:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - qa
+      - prd
+    Description: Enter one of the following dev, itg, itg2, itg3, uat, uat2, uat3, stg, prd
+
+  TemplatePath:
+    Type: String
+    Description: S3Bucket Path where the Cloudformation Child templates are stored
+
+
+Resources:
+  CognitoIdentity:
+    Type: "AWS::CloudFormation::Stack"
+    Properties:
+      Parameters:
+        CostTagParameter: !Ref CostTagParameter
+        EnvironmentParameter: !Ref EnvironmentParameter
+      Tags:
+        - Key: Name
+          Value: !Sub vm-managed-${EnvironmentParameter}-jenkins-master
+        - Key: Description
+          Value: !Sub Create ${EnvironmentParameter} Jenkins Master Server
+        - Key: "vm:cost:accountenv"
+          Value: !Ref CostTagParameter
+      TemplateURL:
+        Fn::Sub: "https://s3.amazonaws.com/${TemplatePath}/vm-managed-jenkins-master.yml"
