@@ -1,0 +1,337 @@
+# In Order to interact with AWS Account, the GitLab CI/CD pipelines require both
+# AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to be defined in your GitLab settings
+# Under Settings > CI/CD > Variables
+
+image: "docker:stable"
+
+stages:
+  - test
+  - validate
+  - package
+  - hotfix
+  - deploy
+  - release
+  - merge-master
+
+include:
+  - project: 'vermontmutual/release-management'
+    ref: 'develop'
+    file:
+      - '/scripts/merge-master.yml'
+
+template-linting:
+  image: "python:3.6.9"
+  stage: test
+  before_script:
+    - pip install yamllint
+  script:
+    - cd scripts/
+    - find . -type f -name 'vm-managed*.yml' -o -name 'vm-managed*.yaml' | xargs yamllint -c app-infra/yamllint-rules
+  except:
+    refs:
+      - master
+    variables:
+      - '$RELEASE =~ /MERGE_MASTER/'
+      - '$RELEASE =~ /CONCRETE/'
+
+template-validation:
+  image: "python:3.6-alpine"
+  stage: validate
+  before_script:
+    - pip install awscli==1.18.133
+  script:
+    - cd scripts/
+    - >
+      for i in `find . -type f \( \( -name 'vm-managed*.yml' -o -name 'vm-managed*.yaml' \) \( -not -name 'vm-managed-dashboard.yml' -not -name 'vm-managed-mq-alerting-master-template.yml' \) \)`; do
+      aws cloudformation validate-template --template-body file://$i --region ${AWS_DEFAULT_REGION} || {
+          c=$?
+          echo -e "Cloudformation Template Validation failed for file: $i \nExit code: $c";
+          exit 1;
+      };
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^develop/
+    - if: $CI_COMMIT_BRANCH =~ /^hotfix/
+
+zip-creation:
+  image: "python:3.7"
+  stage: package
+  before_script:
+    - apt update
+    - apt install zip -y
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - zip -r buildspec.zip buildspec.yml
+    - zip vm-managed-os-code.zip vm-managed-os-code.js
+    - zip vm-managed-os-postdeployment.zip vm-managed-os-postdeployment.py
+    - mkdir packages && cd packages
+    - pip install requests -t .
+    - pip install cfnresponse -t .
+    - cd ..
+    - cp vm-managed-raw-data-s3.py packages/
+    - cd packages
+    - zip -r vm-managed-raw-data-s3.zip *
+    - cd ..
+    - mv packages/vm-managed-raw-data-s3.zip .
+    - rm packages/vm-managed-raw-data-s3.py
+    - cp vm-managed-os-postdeployment.py packages/
+    - cd packages
+    - zip -r vm-managed-os-postdeployment.zip *
+    - cd ..
+    - mv packages/vm-managed-os-postdeployment.zip .
+    - rm packages/vm-managed-os-postdeployment.py
+    - zip -r vm-managed-infra.zip *.yml *.json vm-managed-ssm-param-versions.sh vm-managed-raw-data-s3.zip vm-managed-os-code.zip vm-managed-os-postdeployment.zip -x buildspec.yml gitlab-ci.yml *.py yamllint-rules
+    - cd ../create-aws-account
+    - mkdir packages && cd packages
+    - pip install requests -t .
+    - pip install typing -t .
+    - pip install cfnresponse -t .
+    - cp ../create-account.py .
+    - zip -r create-account.zip *
+    - cd ..
+    - mv packages/create-account.zip .
+    - rm packages/create-account.py
+    - cp service-policy.py packages/
+    - cd packages
+    - zip -r service-policy.zip *
+    - cd ..
+    - mv packages/service-policy.zip .
+    - rm packages/service-policy.py
+  artifacts:
+    paths:
+      - scripts/app-infra/buildspec.zip
+      - scripts/app-infra/vm-managed-infra.zip
+      - scripts/create-aws-account/create-account.zip
+      - scripts/create-aws-account/service-policy.zip
+    expire_in: 3 day
+  except:
+    refs:
+      - master
+    variables:
+      - '$RELEASE =~ /MERGE_MASTER/'
+
+deploytoItg3:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-itg3-app-infra
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop3"
+      when: manual
+
+deploytoUat3:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-uat3-app-infra
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop3"
+      when: manual
+
+deploytoItg2:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-itg2-app-infra
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop2"
+      when: manual
+
+deploytoUat2:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-uat2-app-infra
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop2"
+      when: manual
+
+deploytoItg:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-itg-app-infra
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - if: $CI_COMMIT_BRANCH == "develop"
+      when: manual
+
+deploytoUat:
+  image: "python:3.7"
+  stage: deploy
+  before_script:
+    - apt update
+    - pip install awscli
+  script:
+    - cd scripts/app-infra/
+    - aws s3 cp vm-managed-infra.zip s3://vm-managed-uat-app-infra
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - if: $CI_COMMIT_BRANCH == "develop"
+      when: manual
+
+hotfix-zip-creation:
+  image: "python:3.7"
+  stage: hotfix
+  before_script:
+    - apt update
+    - apt install -y git zip jq
+  script:
+    - export NEW_VERSION="hotfix"
+    - chmod +x ./gitlab-scripts/artifacts-zips.sh
+    - ./gitlab-scripts/artifacts-zips.sh
+  artifacts:
+    paths:
+      - target/versioned/buildspec-*.zip
+      - target/versioned/vm-managed-infra-*.zip
+      - target/versioned/buildspec-cross-account-*.zip
+    expire_in: 2 yrs
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^hotfix/'
+
+release-creation:
+  stage: release
+  image: "python:3.7"
+  before_script:
+    - apt update
+    - apt install -y git zip jq
+    - pip install awscli
+    - echo "$GITLAB_USER_EMAIL" "$GITLAB_USER_NAME"
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - USER_PAT_VAR=$(echo "$GITLAB_USER_EMAIL" | cut -d'@' -f1)_pat
+    - export EXT_PAT="${!USER_PAT_VAR}"
+
+    # ensure the user has owner or maintainer permissions in Vermont Mutual Group
+    - |
+      export USER_ACCESS_LEVEL=$(curl --header "PRIVATE-TOKEN: ${EXT_PAT}" "${CI_API_V4_URL}/groups/6408895/members/${GITLAB_USER_ID}" | jq -r .access_level)
+    - |
+      echo "USER_ACCESS_LEVEL: ${USER_ACCESS_LEVEL}"
+    - |
+      if [[ $USER_ACCESS_LEVEL < 40 ]]; then
+        echo "ERROR: ${GITLAB_USER_NAME} does not have permissions to merge to release"
+        exit 1
+      fi
+
+    - cat build.env
+    - source build.env
+  script:
+    - pwd
+    - echo $CI_PROJECT_DIR
+    - ls -al
+    - cd /tmp
+    - git clone "https://oauth2:${EXT_PAT}@gitlab.com/${CI_PROJECT_PATH}.git"
+    - cd $CI_PROJECT_NAME
+    - echo "PARENT_TAG-->$PARENT_TAG"
+    - export NEW_VERSION=`echo ${infra}`
+    - echo "new version-->$NEW_VERSION"
+    - |
+      if [[ "$PARENT_TAG" == release* ]]
+      then
+        export RELEASE_TAG="release_$NEW_VERSION"
+      else
+        export RELEASE_TAG="hotfix_$NEW_VERSION"
+      fi
+    - echo "RELEASE_TAG-->$RELEASE_TAG"
+
+    - git checkout $CI_COMMIT_BRANCH
+
+# Release: Merge develop into release branch
+# Hotfix: Merge hotfix into release branch; delete hotfix branch
+    - |
+      if [[ "$PARENT_TAG" == release* ]]
+      then
+        git merge origin/develop
+        git push
+        export TAG_MSG="Release for Concrete Version $NEW_VERSION"
+      else
+        git merge "origin/${PARENT_TAG%_*}"
+        git push
+        export TAG_MSG="${PARENT_TAG%_*} for Concrete Version $NEW_VERSION"
+        export HTTP_CODE=$(curl --request DELETE -w "%{HTTP_CODE}" --header "PRIVATE-TOKEN: ${EXT_PAT}" "${CI_API_V4_URL}"/projects/${CI_PROJECT_ID}/protected_branches/hotfix*)
+        git push origin --delete ${PARENT_TAG%_*} --verbose
+        export HTTP_CODE=$(curl --request POST -o "/tmp/http_response" -w "%{HTTP_CODE}" --header "PRIVATE-TOKEN: ${EXT_PAT}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/protected_branches?name=hotfix*&push_access_level=40&merge_access_level=40&unprotect_access_level=40")
+      fi
+
+# Tag the release or the hotfix
+    - git tag $RELEASE_TAG origin/$CI_COMMIT_BRANCH -m "${TAG_MSG}"
+
+    - git push origin $RELEASE_TAG
+
+# Identify all the branches that start with develop
+    - export HTTP_RSP_PATH="/tmp/branch_rsp.json"
+    - |
+      export HTTP_CODE=$(curl -s --request GET -o "$HTTP_RSP_PATH" -w "%{HTTP_CODE}" "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/repository/branches?search=^develop" --header "PRIVATE-TOKEN:${EXT_PAT}" --header "Content-Type: application/json")
+    - echo ">>> Get ^develop branches request response, HTTP_CODE --> $HTTP_CODE"
+    - cat "$HTTP_RSP_PATH"
+    - echo " "
+    - if [[ "$HTTP_CODE" != 200 ]]; then echo ">>> ERROR - see previous messages...failing pipeline"; exit 1; fi
+
+# Create MRs for all branches that start with develop (excluding the develop branch itself for a release)
+    - |
+      for BRANCH in `jq '.[] | .name' ${HTTP_RSP_PATH}`
+      do
+        export BRANCH_NAME=$(echo ${BRANCH} | tr -d '"')
+        if [[ ${BRANCH_NAME} == develop && ${PARENT_TAG} == release* ]]
+        then
+          echo "skipping MR for develop branch for $PARENT_TAG"
+        else
+          export BODY="{
+          \"id\": ${CI_PROJECT_ID},
+          \"source_branch\": \"release\",
+          \"target_branch\": \"${BRANCH_NAME}\",
+          \"title\": \"Merge release branch into ${BRANCH_NAME} branch for tag ${RELEASE_TAG}\",
+          \"remove_source_branch\": false
+          }"
+          export HTTP_RSP_PATH="/tmp/response.json"        
+          echo ">>> Creating Merge Request POST with BODY --> $BODY"
+          HTTP_CODE=$(curl -s --request POST -o "$HTTP_RSP_PATH" -w "%{HTTP_CODE}" "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/merge_requests" --header "PRIVATE-TOKEN:${EXT_PAT}" --header "Content-Type: application/json" --data "${BODY}")
+          echo ">>> Create merge request response, HTTP_CODE --> $HTTP_CODE"
+          cat "$HTTP_RSP_PATH"
+          echo " "
+          if [[ "$HTTP_CODE" != 201 ]]; then echo ">>> ERROR - see previous messages...failing pipeline"; exit 1; fi
+        fi
+      done
+
+    - git checkout tags/$RELEASE_TAG -b $RELEASE_TAG
+    - chmod +x ./gitlab-scripts/artifacts-zips.sh
+    - ./gitlab-scripts/artifacts-zips.sh
+
+  artifacts:
+    paths:
+      - target/versioned/buildspec-*.zip
+      - target/versioned/vm-managed-infra-*.zip
+      - target/versioned/buildspec-cross-account-*.zip
+    expire_in: 2 yrs
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^release/ && $RELEASE =~ /CONCRETE/'
+  needs:
+    - job: zip-creation
+      artifacts: true
+    - project: vermontmutual/release-management
+      job: set_env
+      ref: $PARENT_TAG
+      artifacts: true
